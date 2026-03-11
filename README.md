@@ -227,7 +227,10 @@ chemical-safety-rag-assistant/
 
 ## 🖼️ Demo
 
-<img width="815" height="1034" alt="image" src="https://github.com/user-attachments/assets/f212835b-0ecb-447e-a706-49169a28d19b" />
+<img width="844" height="839" alt="image" src="https://github.com/user-attachments/assets/f3f3c104-b15d-4780-abbf-997e558bc934" />
+<img width="887" height="1102" alt="image" src="https://github.com/user-attachments/assets/0404ab4b-55ae-4c8b-88eb-b328abeab8b7" />
+
+
 
 ---
 
