@@ -239,6 +239,10 @@ chemical-safety-rag-assistant/
 
 ---
 
+## Demo
+<img width="815" height="1034" alt="image" src="https://github.com/user-attachments/assets/f212835b-0ecb-447e-a706-49169a28d19b" />
+
+
 ## 📜 License
 
 This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
