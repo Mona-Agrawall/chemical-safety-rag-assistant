@@ -1,3 +1,4 @@
+import hashlib
 import os
 import tempfile
 from pathlib import Path
@@ -20,55 +21,91 @@ except ImportError:
     from langchain_classic.chains.history_aware_retriever import create_history_aware_retriever
     from langchain_classic.chains.retrieval import create_retrieval_chain
 
-# -------------------------
-# Paths & Settings
-# -------------------------
+# ─────────────────────────────────────────────
+# Constants & Paths
+# ─────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
 VECTORSTORE_PATH = BASE_DIR / "vectorstore"
 DATA_PATH = BASE_DIR / "data"
 
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
+TOP_K_CHUNKS = 5          # Retrieve 5 chunks for richer context
+MAX_HISTORY_TURNS = 6     # Keep only last 6 turns (12 messages) to stay within LLM context window
+OLLAMA_MODEL = "mistral"
 
-# -------------------------
-# Page Configuration
-# -------------------------
+# ─────────────────────────────────────────────
+# Page Config
+# ─────────────────────────────────────────────
 st.set_page_config(
     page_title="Chemical Safety RAG Assistant",
     page_icon="⚗️",
     layout="wide"
 )
 
-# -------------------------
-# Resource Caching
-# -------------------------
+# ─────────────────────────────────────────────
+# Cached Resources (load once per server session)
+# ─────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
-def get_embeddings():
-    """Cache the sentence-transformers model so weights aren't reloaded repeatedly."""
+def get_embeddings() -> HuggingFaceEmbeddings:
+    """Load MiniLM sentence-transformer weights once into memory."""
     return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 
-# -------------------------
-# Document Ingestion Utilities
-# -------------------------
-def process_pdfs(files):
-    """Extract documents from uploaded PDFs and guarantee cleanup of temporary files."""
-    documents = []
+@st.cache_resource(show_spinner=False)
+def get_llm() -> ChatOllama:
+    """Create a single shared Ollama client (not re-instantiated on chain rebuild)."""
+    return ChatOllama(model=OLLAMA_MODEL, temperature=0)
 
+
+def check_ollama() -> tuple[bool, str]:
+    """
+    Probe Ollama with a trivial request to confirm it's reachable before
+    any user interaction.  Returns (ok: bool, error_message: str).
+    """
+    try:
+        llm = get_llm()
+        llm.invoke("ping")
+        return True, ""
+    except Exception as e:
+        err = str(e)
+        if "Connection refused" in err or "ConnectError" in err or "connect" in err.lower():
+            return False, (
+                "Cannot connect to Ollama. Make sure it is running.\n\n"
+                "**Start Ollama:** open a terminal and run `ollama serve`\n\n"
+                f"**Then pull the model:** `ollama pull {OLLAMA_MODEL}`"
+            )
+        return False, f"Ollama error: {err}"
+
+
+# ─────────────────────────────────────────────
+# PDF Processing Utilities
+# ─────────────────────────────────────────────
+def _file_signature(files) -> str:
+    """
+    Produce a stable hash from (name, size) pairs so we only re-index
+    when the actual file set changes, not on every Streamlit rerun.
+    """
+    key = str(sorted((f.name, f.size) for f in files))
+    return hashlib.md5(key.encode()).hexdigest()
+
+
+def process_pdfs(files) -> list:
+    """
+    Extract LangChain Documents from uploaded PDF files.
+    Guarantees deletion of temporary disk copies via try/finally.
+    """
+    documents = []
     for file in files:
         tmp_path = None
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 file.seek(0)
-                tmp_file.write(file.read())
-                tmp_path = tmp_file.name
-
-            loader = PyPDFLoader(tmp_path)
-            docs = loader.load()
-
+                tmp.write(file.read())
+                tmp_path = tmp.name
+            docs = PyPDFLoader(tmp_path).load()
             for doc in docs:
                 doc.metadata["source"] = file.name
-
             documents.extend(docs)
         finally:
             if tmp_path and os.path.exists(tmp_path):
@@ -76,279 +113,367 @@ def process_pdfs(files):
                     os.unlink(tmp_path)
                 except OSError:
                     pass
-
     return documents
 
 
-def split_documents(documents):
-    """Split documents using standardized chunk size and overlap."""
-    splitter = RecursiveCharacterTextSplitter(
+def split_documents(documents: list) -> list:
+    """Split documents into overlapping chunks using shared constants."""
+    return RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP
-    )
-    return splitter.split_documents(documents)
+        chunk_overlap=CHUNK_OVERLAP,
+    ).split_documents(documents)
 
 
-def create_vectorstore(chunks):
-    """Create a FAISS vector store from chunked documents."""
-    embeddings = get_embeddings()
-    return FAISS.from_documents(chunks, embeddings)
+def create_vectorstore(chunks: list) -> FAISS:
+    """Build an in-memory FAISS index from document chunks."""
+    return FAISS.from_documents(chunks, get_embeddings())
 
 
-def load_default_vectorstore():
-    """Load pre-indexed FAISS database from disk if available."""
-    if VECTORSTORE_PATH.exists() and (VECTORSTORE_PATH / "index.faiss").exists():
-        embeddings = get_embeddings()
+def load_default_vectorstore() -> FAISS | None:
+    """Load the pre-built FAISS index from disk if it exists."""
+    faiss_file = VECTORSTORE_PATH / "index.faiss"
+    if VECTORSTORE_PATH.exists() and faiss_file.exists():
         return FAISS.load_local(
             str(VECTORSTORE_PATH),
-            embeddings,
-            allow_dangerous_deserialization=True
+            get_embeddings(),
+            allow_dangerous_deserialization=True,
         )
     return None
 
 
-# -------------------------
+# ─────────────────────────────────────────────
 # RAG Chain Construction
-# -------------------------
-def create_chain(vectorstore):
-    """Build the conversational RAG chain with anti-hallucination guardrails."""
-    retriever = vectorstore.as_retriever(
-        search_kwargs={"k": 4}
-    )
+# ─────────────────────────────────────────────
+def create_chain(vectorstore: FAISS):
+    """
+    Build the full conversational RAG chain:
+      1. history_aware_retriever  – rewrites ambiguous follow-up questions
+      2. stuff_documents_chain    – fills the safety-focused QA prompt
+      3. retrieval_chain          – wires them together
 
-    llm = ChatOllama(
-        model="mistral",
-        temperature=0
-    )
+    Uses the module-level cached LLM so Ollama is not re-connected on
+    every vectorstore switch.
+    """
+    llm = get_llm()
+    retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K_CHUNKS})
 
-    # 1. Contextualize Question Prompt
-    contextualize_q_prompt = ChatPromptTemplate.from_messages([
+    # Rewrite follow-up questions to be self-contained
+    contextualize_prompt = ChatPromptTemplate.from_messages([
         ("system",
-         "Given a chat history and the latest user question which might "
-         "reference context in the chat history, formulate a standalone "
-         "question which can be understood without the chat history. "
-         "Do NOT answer the question, just reformulate it if needed "
-         "and otherwise return it as is."),
+         "Given the chat history and the latest user question, rewrite the question "
+         "as a fully self-contained query that does NOT rely on prior context. "
+         "Return it unchanged if it is already self-contained. Do NOT answer it."),
         MessagesPlaceholder("chat_history"),
         ("human", "{input}"),
     ])
-
     history_aware_retriever = create_history_aware_retriever(
-        llm, retriever, contextualize_q_prompt
+        llm, retriever, contextualize_prompt
     )
 
-    # 2. Strict Chemical Safety QA Prompt
+    # Chemical-safety-specific QA prompt with strict grounding rules
     qa_prompt = ChatPromptTemplate.from_messages([
         ("system",
-         "You are an expert Chemical Safety Assistant. Use the following Safety Data Sheet (SDS) "
-         "context to answer the user's question accurately and concisely.\n\n"
-         "CRITICAL SAFETY GUIDELINES:\n"
-         "1. Ground your answers strictly on the provided SDS context. Do NOT guess, extrapolate, or "
-         "assume chemical properties, exposure limits, PPE glove materials, or first aid measures.\n"
-         "2. If the provided context does not contain the answer, explicitly state: "
+         "You are a specialist Chemical Safety Assistant. Your answers must be "
+         "based SOLELY on the Safety Data Sheet (SDS) context provided below.\n\n"
+         "RULES — follow these exactly:\n"
+         "1. Do NOT speculate, extrapolate, or use general chemistry knowledge to "
+         "fill gaps. Chemical properties (flash points, exposure limits, PPE "
+         "materials, first-aid steps) MUST come from the retrieved text.\n"
+         "2. If the context does not contain the requested information, say EXACTLY: "
          "'The provided Safety Data Sheets do not contain this information.'\n"
-         "3. Always cite the source SDS document and page number for safety recommendations.\n\n"
-         "Context:\n{context}"),
+         "3. Cite the source document name and page number at the end of every "
+         "factual statement, e.g. *(acetone_sds.pdf – p. 4)*.\n"
+         "4. Use clear, plain language suitable for a lab technician or first responder.\n\n"
+         "SDS Context:\n{context}"),
         MessagesPlaceholder("chat_history"),
         ("human", "{input}"),
     ])
 
-    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
-
-    return create_retrieval_chain(
-        history_aware_retriever, question_answer_chain
-    )
+    qa_chain = create_stuff_documents_chain(llm, qa_prompt)
+    return create_retrieval_chain(history_aware_retriever, qa_chain)
 
 
-# -------------------------
-# Sidebar Controls & Information
-# -------------------------
-with st.sidebar:
-    st.header("⚙️ Controls & Database")
+# ─────────────────────────────────────────────
+# History Windowing
+# ─────────────────────────────────────────────
+def get_windowed_history() -> list:
+    """
+    Return only the most recent MAX_HISTORY_TURNS turn-pairs from the
+    LangChain chat_history list to avoid overflowing the LLM context window.
+    Each turn = 1 HumanMessage + 1 AIMessage = 2 list items.
+    """
+    history = st.session_state.get("chat_history", [])
+    max_messages = MAX_HISTORY_TURNS * 2
+    return history[-max_messages:] if len(history) > max_messages else history
 
-    if st.button("🧹 Clear Chat History", use_container_width=True):
-        st.session_state.messages = []
-        st.session_state.chat_history = []
-        st.rerun()
 
-    st.divider()
+# ─────────────────────────────────────────────
+# Source Deduplication
+# ─────────────────────────────────────────────
+def deduplicate_sources(context_docs: list) -> list:
+    """
+    Remove duplicate chunks by (source, page) so the citation panel
+    doesn't show the same page excerpt multiple times.
+    """
+    seen = set()
+    unique = []
+    for doc in context_docs:
+        src = doc.metadata.get("source", "Unknown")
+        raw = doc.metadata.get("page", 0)
+        page = (raw + 1) if isinstance(raw, int) else raw
+        key = (src, page)
+        if key not in seen:
+            seen.add(key)
+            unique.append((src, page, doc.page_content.strip()))
+    return unique
 
-    st.subheader("Knowledge Base Status")
-    active_source = st.session_state.get("active_source", "Not initialized")
-    if "Uploaded" in active_source:
-        st.info(f"📁 **Active Source:**\n{active_source}")
-    elif "Pre-indexed" in active_source:
-        st.success(f"🗄️ **Active Source:**\n{active_source}")
+
+# ─────────────────────────────────────────────
+# Session State Helpers
+# ─────────────────────────────────────────────
+def init_session_state():
+    defaults = {
+        "messages": [],
+        "chat_history": [],
+        "current_upload_sig": None,
+        "active_source": "Initializing…",
+        "ollama_ok": None,   # None = not checked yet
+    }
+    for key, val in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = val
+
+
+def load_chain_from_default():
+    """Attempt to load the pre-built vectorstore and wire the chain."""
+    vs = load_default_vectorstore()
+    if vs:
+        st.session_state.chain = create_chain(vs)
+        st.session_state.active_source = (
+            "Pre-indexed SDS database (Acetone, Benzene, Ethanol, Methanol)"
+        )
     else:
-        st.warning(f"⚠️ {active_source}")
-
-    st.divider()
-    st.subheader("💡 Example Questions")
-    sample_queries = [
-        "What are the primary hazards of acetone?",
-        "What PPE is required when handling benzene?",
-        "What is the flash point of ethanol?",
-        "What first-aid measures apply to methanol ingestion?",
-        "How should acetone be stored?"
-    ]
-    for sq in sample_queries:
-        if st.button(f"🔍 {sq}", key=f"sq_{sq}", use_container_width=True):
-            st.session_state.preset_query = sq
-
-    st.divider()
-    st.caption("🤖 Powered by local **Mistral (Ollama)** & **all-MiniLM-L6-v2** embeddings.")
+        st.session_state.pop("chain", None)
+        st.session_state.active_source = "No database found. Upload SDS PDFs to begin."
 
 
-# -------------------------
-# Header & File Upload
-# -------------------------
+# ─────────────────────────────────────────────
+# Sidebar
+# ─────────────────────────────────────────────
+def render_sidebar():
+    with st.sidebar:
+        st.header("⚙️ Controls")
+
+        if st.button("🧹 Clear Chat History", use_container_width=True):
+            st.session_state.messages = []
+            st.session_state.chat_history = []
+            st.rerun()
+
+        st.divider()
+
+        # Ollama status
+        st.subheader("🤖 Ollama Status")
+        if st.session_state.ollama_ok is True:
+            st.success(f"✅ Connected — `{OLLAMA_MODEL}` ready")
+        elif st.session_state.ollama_ok is False:
+            st.error("❌ Ollama unreachable")
+        else:
+            st.info("⏳ Checking…")
+
+        st.divider()
+
+        # Knowledge base status
+        st.subheader("🗄️ Knowledge Base")
+        src = st.session_state.get("active_source", "")
+        if "Uploaded" in src:
+            st.info(f"📁 {src}")
+        elif "Pre-indexed" in src:
+            st.success(f"🗄️ {src}")
+        elif "Initializing" in src:
+            st.info(f"⏳ {src}")
+        else:
+            st.warning(f"⚠️ {src}")
+
+        # History window indicator
+        total_turns = len(st.session_state.chat_history) // 2
+        st.caption(
+            f"Conversation: {total_turns} turns "
+            f"(window: last {min(total_turns, MAX_HISTORY_TURNS)} sent to LLM)"
+        )
+
+        st.divider()
+
+        # Preset questions
+        st.subheader("💡 Example Questions")
+        presets = [
+            "What are the primary hazards of acetone?",
+            "What PPE is required when handling benzene?",
+            "What is the flash point of ethanol?",
+            "What first-aid measures apply to methanol ingestion?",
+            "How should acetone be stored safely?",
+        ]
+        for q in presets:
+            if st.button(f"🔍 {q}", key=f"preset_{q}", use_container_width=True):
+                st.session_state.preset_query = q
+
+        st.divider()
+        st.caption(
+            "🔒 Fully offline · No API keys required\n\n"
+            f"Model: **{OLLAMA_MODEL}** · Embeddings: **all-MiniLM-L6-v2**"
+        )
+
+
+# ─────────────────────────────────────────────
+# Main Application
+# ─────────────────────────────────────────────
+init_session_state()
+
+# ── Ollama health check (runs once per session) ──────────────────────────
+if st.session_state.ollama_ok is None:
+    with st.spinner("Checking Ollama connection…"):
+        ok, err_msg = check_ollama()
+    st.session_state.ollama_ok = ok
+    if not ok:
+        st.error(f"⚠️ {err_msg}")
+
+render_sidebar()
+
+# ── Page header ──────────────────────────────────────────────────────────
 st.title("⚗️ Chemical Safety RAG Assistant")
 st.markdown(
-    "Ask natural-language questions about chemical hazards, exposure limits, PPE, "
-    "storage, and first aid — grounded directly in Safety Data Sheets (SDS)."
+    "Ask natural-language questions about chemical **hazards, PPE, first aid, "
+    "and storage** — grounded directly in Safety Data Sheets (SDS)."
 )
 
+# ── File uploader ─────────────────────────────────────────────────────────
 uploaded_files = st.file_uploader(
-    "Upload custom Safety Data Sheets (PDF) to augment or replace the database:",
+    "Upload custom Safety Data Sheets (PDF):",
     type=["pdf"],
-    accept_multiple_files=True
+    accept_multiple_files=True,
+    help="Uploads replace the active knowledge base for this session. "
+         "Remove files to revert to the pre-indexed database.",
 )
 
-# -------------------------
-# State Synchronization (Prevent Re-embedding)
-# -------------------------
-upload_signature = [(f.name, f.size) for f in uploaded_files] if uploaded_files else None
+# ── Vectorstore / chain state management ─────────────────────────────────
+new_sig = _file_signature(uploaded_files) if uploaded_files else None
 
-if "current_upload_signature" not in st.session_state:
-    st.session_state.current_upload_signature = None
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
-# Scenario A: New files uploaded or files changed
-if uploaded_files and st.session_state.current_upload_signature != upload_signature:
-    with st.spinner("Processing and indexing uploaded documents..."):
+if uploaded_files and new_sig != st.session_state.current_upload_sig:
+    # New or changed files — reindex
+    with st.spinner(f"Indexing {len(uploaded_files)} file(s)…"):
         try:
             docs = process_pdfs(uploaded_files)
             if docs:
                 chunks = split_documents(docs)
                 vs = create_vectorstore(chunks)
                 st.session_state.chain = create_chain(vs)
-                file_names = ", ".join([f.name for f in uploaded_files])
-                st.session_state.active_source = f"Uploaded files: {file_names} ({len(chunks)} chunks)"
-                st.session_state.current_upload_signature = upload_signature
-                st.toast("✅ Custom documents indexed successfully!")
+                names = ", ".join(f.name for f in uploaded_files)
+                st.session_state.active_source = (
+                    f"Uploaded: {names} — {len(chunks)} chunks"
+                )
+                st.session_state.current_upload_sig = new_sig
+                st.toast(f"✅ Indexed {len(chunks)} chunks from {len(uploaded_files)} file(s).")
             else:
-                st.error("❌ Could not extract text from the uploaded PDFs.")
-        except Exception as e:
-            st.error(f"❌ Error processing documents: {e}")
+                st.error("❌ No text could be extracted from the uploaded PDFs.")
+        except Exception as exc:
+            st.error(f"❌ Indexing failed: {exc}")
 
-# Scenario B: Custom files removed -> Fall back to pre-indexed vectorstore
-elif not uploaded_files and st.session_state.current_upload_signature is not None:
-    st.session_state.current_upload_signature = None
-    default_vs = load_default_vectorstore()
-    if default_vs:
-        st.session_state.chain = create_chain(default_vs)
-        st.session_state.active_source = "Pre-indexed SDS database (Acetone, Benzene, Ethanol, Methanol)"
-        st.toast("Reverted to pre-indexed default chemical database.")
-    else:
-        st.session_state.pop("chain", None)
-        st.session_state.active_source = "No database available"
+elif not uploaded_files and st.session_state.current_upload_sig is not None:
+    # Files removed — revert to default
+    st.session_state.current_upload_sig = None
+    with st.spinner("Loading pre-indexed database…"):
+        load_chain_from_default()
+    st.toast("Reverted to the pre-indexed chemical database.")
 
-# Scenario C: Initial application load with no custom uploads
-elif "chain" not in st.session_state and not uploaded_files:
-    default_vs = load_default_vectorstore()
-    if default_vs:
-        st.session_state.chain = create_chain(default_vs)
-        st.session_state.active_source = "Pre-indexed SDS database (Acetone, Benzene, Ethanol, Methanol)"
-    else:
-        st.session_state.active_source = "No database loaded. Please upload SDS PDFs."
-
+elif "chain" not in st.session_state:
+    # First load — pull default vectorstore
+    with st.spinner("Loading pre-indexed SDS database…"):
+        load_chain_from_default()
 
 st.divider()
 
-# -------------------------
-# Display Chat History with Persistent Citations
-# -------------------------
+# ── Chat history display ──────────────────────────────────────────────────
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if msg.get("sources"):
-            with st.expander("📑 Referenced SDS Sources"):
+            with st.expander("📑 Referenced SDS Sources", expanded=False):
                 for src in msg["sources"]:
-                    st.caption(f"**Source:** `{src['source']}` | **Page:** `{src['page']}`")
+                    st.caption(
+                        f"**{src['source']}** · Page {src['page']}"
+                    )
                     st.text(src["content"])
+                    st.divider()
 
-# -------------------------
-# Chat Input & Response Generation
-# -------------------------
-preset_input = st.session_state.pop("preset_query", None)
-chat_input_val = st.chat_input("Ask a chemical safety question (e.g., 'What protective equipment is required for benzene?')")
-query_to_run = preset_input or chat_input_val
+# ── Chat input ────────────────────────────────────────────────────────────
+preset = st.session_state.pop("preset_query", None)
+user_input = st.chat_input(
+    "Ask a chemical safety question…",
+    disabled=not st.session_state.get("ollama_ok", False),
+)
+query = preset or user_input
 
-if query_to_run:
+# ── Input validation ──────────────────────────────────────────────────────
+if query and not query.strip():
+    query = None  # ignore whitespace-only input
+
+if query:
     if "chain" not in st.session_state:
-        st.warning("⚠️ Please wait for the database to load or upload SDS PDF files.")
+        st.warning("⚠️ Please wait for the database to finish loading, or upload SDS PDFs.")
+    elif not st.session_state.ollama_ok:
+        st.error("❌ Ollama is not running. Please start it and refresh the page.")
     else:
-        # Display user question
-        st.session_state.messages.append({"role": "user", "content": query_to_run})
+        # Show user message
+        st.session_state.messages.append({"role": "user", "content": query})
         with st.chat_message("user"):
-            st.markdown(query_to_run)
+            st.markdown(query)
 
-        # Generate assistant answer
+        # Generate answer
         with st.chat_message("assistant"):
             try:
-                with st.spinner("Analyzing Safety Data Sheets with Mistral..."):
+                with st.spinner("Searching SDS documents and generating answer…"):
                     result = st.session_state.chain.invoke({
-                        "input": query_to_run,
-                        "chat_history": st.session_state.chat_history
+                        "input": query,
+                        "chat_history": get_windowed_history(),
                     })
 
-                answer = result.get("answer", "")
+                answer = result.get("answer", "").strip()
+                if not answer:
+                    answer = "I was unable to generate an answer. Please try rephrasing your question."
+
                 st.markdown(answer)
 
-                # Format and display sources
-                formatted_sources = []
-                context_docs = result.get("context", [])
-                if context_docs:
-                    with st.expander("📑 Referenced SDS Sources"):
-                        for doc in context_docs:
-                            src_name = doc.metadata.get("source", "Unknown SDS")
-                            raw_page = doc.metadata.get("page", 0)
-                            page_num = (raw_page + 1) if isinstance(raw_page, int) else raw_page
-                            content_snippet = doc.page_content.strip()
+                # Deduplicated source citations
+                raw_context = result.get("context", [])
+                unique_sources = deduplicate_sources(raw_context)
 
-                            st.caption(f"**Source:** `{src_name}` | **Page:** `{page_num}`")
-                            st.text(content_snippet)
+                if unique_sources:
+                    with st.expander("📑 Referenced SDS Sources", expanded=False):
+                        for src_name, page_num, snippet in unique_sources:
+                            st.caption(f"**{src_name}** · Page {page_num}")
+                            st.text(snippet)
+                            st.divider()
 
-                            formatted_sources.append({
-                                "source": src_name,
-                                "page": page_num,
-                                "content": content_snippet
-                            })
-
-                # Append assistant message with saved sources
+                # Persist to session
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": answer,
-                    "sources": formatted_sources
+                    "sources": [
+                        {"source": s, "page": p, "content": c}
+                        for s, p, c in unique_sources
+                    ],
                 })
-
-                # Persist conversational memory
                 st.session_state.chat_history.extend([
-                    HumanMessage(content=query_to_run),
-                    AIMessage(content=answer)
+                    HumanMessage(content=query),
+                    AIMessage(content=answer),
                 ])
 
-            except Exception as e:
-                error_str = str(e)
-                if "Connection refused" in error_str or "ConnectError" in error_str:
+            except Exception as exc:
+                err = str(exc)
+                if "Connection refused" in err or "ConnectError" in err:
                     st.error(
-                        "❌ Cannot connect to Ollama. Please ensure Ollama is running.\n\n"
-                        "Run: `ollama serve`"
+                        "❌ Lost connection to Ollama mid-session. "
+                        "Please ensure `ollama serve` is running and refresh the page."
                     )
+                    st.session_state.ollama_ok = False
                 else:
-                    st.error(f"❌ Error generating response: {e}")
+                    st.error(f"❌ Error generating response: {exc}")
