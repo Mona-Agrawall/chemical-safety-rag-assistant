@@ -44,6 +44,361 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────
+# Custom Styling
+# ─────────────────────────────────────────────
+st.markdown("""
+<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
+
+<style>
+
+/* ── Global reset & font ─────────────────────────────────────── */
+html, body, [class*="css"], .stApp {
+    font-family: 'EB Garamond', Georgia, serif !important;
+    background-color: #F8F7F5 !important;
+    color: #1A1A1A !important;
+}
+
+/* ── Main content area ───────────────────────────────────────── */
+.main .block-container {
+    background-color: #F8F7F5 !important;
+    padding-top: 2rem !important;
+    padding-bottom: 4rem !important;
+    max-width: 900px !important;
+}
+
+/* ── App title ───────────────────────────────────────────────── */
+h1 {
+    font-family: 'EB Garamond', Georgia, serif !important;
+    font-size: 2.4rem !important;
+    font-weight: 600 !important;
+    color: #0F0F0F !important;
+    letter-spacing: -0.02em !important;
+    line-height: 1.2 !important;
+    margin-bottom: 0.3rem !important;
+}
+
+h2, h3 {
+    font-family: 'EB Garamond', Georgia, serif !important;
+    color: #1A1A1A !important;
+    font-weight: 600 !important;
+}
+
+/* ── Subtitle / body text ────────────────────────────────────── */
+p, .stMarkdown p {
+    font-family: 'EB Garamond', Georgia, serif !important;
+    font-size: 1.1rem !important;
+    color: #3D3D3D !important;
+    line-height: 1.7 !important;
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    background-color: #FFFFFF !important;
+    border-right: 1px solid #E8E4DF !important;
+}
+
+[data-testid="stSidebar"] .block-container {
+    padding-top: 2rem !important;
+    padding-bottom: 2rem !important;
+}
+
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+    font-size: 1rem !important;
+    font-weight: 600 !important;
+    color: #0F0F0F !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.08em !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.7rem !important;
+}
+
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] .stMarkdown p {
+    font-size: 0.95rem !important;
+    color: #5A5A5A !important;
+    font-family: 'Inter', sans-serif !important;
+}
+
+[data-testid="stSidebar"] .stCaption,
+[data-testid="stSidebar"] small {
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.78rem !important;
+    color: #888888 !important;
+}
+
+/* ── Sidebar buttons (preset questions) ─────────────────────── */
+[data-testid="stSidebar"] .stButton > button {
+    background-color: #F5F3F0 !important;
+    color: #2A2A2A !important;
+    border: 1px solid #E2DDD8 !important;
+    border-radius: 6px !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.78rem !important;
+    font-weight: 400 !important;
+    padding: 0.45rem 0.8rem !important;
+    text-align: left !important;
+    width: 100% !important;
+    transition: all 0.18s ease !important;
+    white-space: normal !important;
+    height: auto !important;
+    line-height: 1.4 !important;
+}
+
+[data-testid="stSidebar"] .stButton > button:hover {
+    background-color: #1A1A1A !important;
+    color: #FFFFFF !important;
+    border-color: #1A1A1A !important;
+    transform: translateX(2px) !important;
+}
+
+/* ── Clear history button ─────────────────────────────────────── */
+[data-testid="stSidebar"] .stButton:first-of-type > button {
+    background-color: #1A1A1A !important;
+    color: #FFFFFF !important;
+    border: none !important;
+    border-radius: 6px !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.82rem !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.02em !important;
+    padding: 0.55rem 1rem !important;
+    transition: all 0.18s ease !important;
+}
+
+[data-testid="stSidebar"] .stButton:first-of-type > button:hover {
+    background-color: #3A3A3A !important;
+    transform: none !important;
+}
+
+/* ── Dividers ────────────────────────────────────────────────── */
+hr {
+    border: none !important;
+    border-top: 1px solid #E8E4DF !important;
+    margin: 1.2rem 0 !important;
+}
+
+/* ── File uploader ───────────────────────────────────────────── */
+[data-testid="stFileUploader"] {
+    background-color: #FFFFFF !important;
+    border: 1.5px dashed #C8C0B8 !important;
+    border-radius: 10px !important;
+    padding: 1.2rem !important;
+    transition: border-color 0.2s ease !important;
+}
+
+[data-testid="stFileUploader"]:hover {
+    border-color: #1A1A1A !important;
+}
+
+[data-testid="stFileUploader"] label {
+    font-family: 'EB Garamond', Georgia, serif !important;
+    font-size: 1rem !important;
+    color: #3D3D3D !important;
+}
+
+[data-testid="stFileUploader"] small,
+[data-testid="stFileUploader"] .stCaption {
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.78rem !important;
+    color: #8A8A8A !important;
+}
+
+/* ── Chat messages ───────────────────────────────────────────── */
+[data-testid="stChatMessage"] {
+    border-radius: 10px !important;
+    margin-bottom: 0.8rem !important;
+    padding: 1rem 1.2rem !important;
+    font-family: 'EB Garamond', Georgia, serif !important;
+}
+
+/* User message */
+[data-testid="stChatMessage"][data-testid*="user"],
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
+    background-color: #EFEFED !important;
+    border: 1px solid #E4E0DA !important;
+}
+
+/* Assistant message */
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {
+    background-color: #FFFFFF !important;
+    border: 1px solid #E8E4DF !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.05) !important;
+}
+
+[data-testid="stChatMessage"] p {
+    font-size: 1.05rem !important;
+    line-height: 1.75 !important;
+    color: #1A1A1A !important;
+}
+
+/* Chat avatar icons */
+[data-testid="chatAvatarIcon-user"] {
+    background-color: #1A1A1A !important;
+    color: #FFFFFF !important;
+}
+
+[data-testid="chatAvatarIcon-assistant"] {
+    background-color: #8B7355 !important;
+    color: #FFFFFF !important;
+}
+
+/* ── Chat input bar ──────────────────────────────────────────── */
+[data-testid="stChatInputContainer"] {
+    background-color: #FFFFFF !important;
+    border: 1.5px solid #D8D2CB !important;
+    border-radius: 10px !important;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06) !important;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease !important;
+}
+
+[data-testid="stChatInputContainer"]:focus-within {
+    border-color: #1A1A1A !important;
+    box-shadow: 0 2px 16px rgba(0,0,0,0.1) !important;
+}
+
+[data-testid="stChatInputContainer"] textarea {
+    font-family: 'EB Garamond', Georgia, serif !important;
+    font-size: 1.05rem !important;
+    color: #1A1A1A !important;
+    background-color: transparent !important;
+}
+
+[data-testid="stChatInputContainer"] textarea::placeholder {
+    color: #ABABAB !important;
+    font-style: italic !important;
+}
+
+/* Chat send button */
+[data-testid="stChatInputSubmitButton"] > button {
+    background-color: #1A1A1A !important;
+    color: #FFFFFF !important;
+    border-radius: 7px !important;
+    border: none !important;
+    transition: background-color 0.18s ease !important;
+}
+
+[data-testid="stChatInputSubmitButton"] > button:hover {
+    background-color: #3A3A3A !important;
+}
+
+/* ── Expanders (source citations) ────────────────────────────── */
+[data-testid="stExpander"] {
+    background-color: #FFFFFF !important;
+    border: 1px solid #E8E4DF !important;
+    border-radius: 8px !important;
+    margin-top: 0.6rem !important;
+}
+
+[data-testid="stExpander"] summary {
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.82rem !important;
+    font-weight: 500 !important;
+    color: #5A5A5A !important;
+    letter-spacing: 0.02em !important;
+    padding: 0.6rem 0.8rem !important;
+}
+
+[data-testid="stExpander"] summary:hover {
+    color: #1A1A1A !important;
+}
+
+[data-testid="stExpander"] .stText,
+[data-testid="stExpander"] pre {
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.8rem !important;
+    color: #5A5A5A !important;
+    background-color: #F8F7F5 !important;
+    border-radius: 6px !important;
+    padding: 0.6rem 0.8rem !important;
+    line-height: 1.55 !important;
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+}
+
+.stCaption, small {
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.78rem !important;
+    color: #7A7A7A !important;
+    font-weight: 500 !important;
+}
+
+/* ── Alerts (success / info / warning / error) ───────────────── */
+[data-testid="stAlert"] {
+    border-radius: 8px !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.9rem !important;
+    border-left-width: 3px !important;
+}
+
+/* Success */
+[data-testid="stAlert"][data-baseweb="notification"][kind="positive"] {
+    background-color: #F2FAF5 !important;
+    border-left-color: #2D7A55 !important;
+    color: #1A4830 !important;
+}
+
+/* Info */
+[data-testid="stAlert"][data-baseweb="notification"][kind="info"] {
+    background-color: #F5F7FA !important;
+    border-left-color: #5A7A9A !important;
+    color: #2A3D50 !important;
+}
+
+/* Warning */
+[data-testid="stAlert"][data-baseweb="notification"][kind="warning"] {
+    background-color: #FDF8F0 !important;
+    border-left-color: #A07840 !important;
+    color: #5A4020 !important;
+}
+
+/* Error */
+[data-testid="stAlert"][data-baseweb="notification"][kind="negative"] {
+    background-color: #FDF2F2 !important;
+    border-left-color: #A03535 !important;
+    color: #5A1A1A !important;
+}
+
+/* ── Spinner ─────────────────────────────────────────────────── */
+[data-testid="stSpinner"] p {
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.88rem !important;
+    color: #6A6A6A !important;
+    font-style: italic !important;
+}
+
+/* ── Scrollbar ───────────────────────────────────────────────── */
+::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+}
+::-webkit-scrollbar-track {
+    background: #F0EDE9;
+}
+::-webkit-scrollbar-thumb {
+    background: #C8C0B8;
+    border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #9A9490;
+}
+
+/* ── Tooltip / help icon ─────────────────────────────────────── */
+[data-testid="stTooltipIcon"] {
+    color: #ABABAB !important;
+}
+
+/* ── Selection highlight ─────────────────────────────────────── */
+::selection {
+    background-color: #C8B89A !important;
+    color: #1A1A1A !important;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
 # Cached Resources (load once per server session)
 # ─────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
@@ -339,19 +694,44 @@ if st.session_state.ollama_ok is None:
 render_sidebar()
 
 # ── Page header ──────────────────────────────────────────────────────────
-st.title("⚗️ Chemical Safety RAG Assistant")
-st.markdown(
-    "Ask natural-language questions about chemical **hazards, PPE, first aid, "
-    "and storage** — grounded directly in Safety Data Sheets (SDS)."
-)
+st.markdown("""
+<div style="margin-bottom: 0.2rem;">
+    <span style="
+        font-family: 'Inter', sans-serif;
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: #8B7355;
+    ">Chemical Safety · RAG Assistant</span>
+</div>
+<h1 style="
+    font-family: 'EB Garamond', Georgia, serif;
+    font-size: 2.6rem;
+    font-weight: 600;
+    color: #0F0F0F;
+    letter-spacing: -0.025em;
+    line-height: 1.15;
+    margin: 0 0 0.5rem 0;
+">⚗️ Ask Your Safety Data Sheets</h1>
+<p style="
+    font-family: 'EB Garamond', Georgia, serif;
+    font-size: 1.1rem;
+    color: #6A6A6A;
+    margin: 0 0 1.5rem 0;
+    line-height: 1.6;
+    font-style: italic;
+">Grounded answers on chemical hazards, PPE, first aid, and storage —
+cited directly from your SDS documents.</p>
+<div style="width: 48px; height: 2px; background-color: #8B7355; border-radius: 2px; margin-bottom: 1.5rem;"></div>
+""", unsafe_allow_html=True)
 
 # ── File uploader ─────────────────────────────────────────────────────────
 uploaded_files = st.file_uploader(
-    "Upload custom Safety Data Sheets (PDF):",
+    "📎  Upload Safety Data Sheets (PDF)",
     type=["pdf"],
     accept_multiple_files=True,
-    help="Uploads replace the active knowledge base for this session. "
-         "Remove files to revert to the pre-indexed database.",
+    help="Uploads replace the active knowledge base for this session. Remove files to revert to the pre-indexed database.",
 )
 
 # ── Vectorstore / chain state management ─────────────────────────────────
