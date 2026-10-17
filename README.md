@@ -120,22 +120,46 @@ replaces the earlier upload; uploading content that is already indexed is report
 
 ## How it works
 
-```
-                 ┌──────────── ingestion (python ingest.py / in-app upload) ────────────┐
- SDS PDFs ──► pypdf text ──► chemical identity ──► boilerplate removal ──► 16-section split
- (data/)      per page       (name, CAS, synonyms)   (running headers)      + sub-chunks with page ranges
-                                                                                   │
-                         embeddings (all-MiniLM-L6-v2) ──► FAISS IndexFlatIP  ◄────┘
-                         manifest.json (model, chunking, file hashes) + chunks.json
-                 └───────────────────────────────────────────────────────────────────────┘
+The app works in two stages. **Indexing** (`python ingest.py`, or *Add SDS documents* in the app)
+turns the PDFs into a searchable knowledge base; **answering** searches it for every question.
 
- question ──► detect chemicals ──► scoped search per chemical ──► dense + BM25 ──► RRF fusion
-                (names, aliases,      (or history / user filter)                    top-k excerpts
-                 CAS numbers)                                                            │
-              prompt: rules + <sources>[S1] Chemical | File | page | Section … </sources> ◄┘
-                                   │
-                    Ollama (streamed) ──► citation validation ──► answer with [1][2] + sources panel
+```mermaid
+flowchart LR
+    subgraph IDX["① Indexing · once per document"]
+        direction TB
+        PDF["📄 SDS PDFs<br/>data/"] --> TXT["Extract text<br/>page by page"]
+        TXT --> ID["Identify the chemical<br/>name · CAS · synonyms"]
+        ID --> SEC["Split into the<br/>16 SDS sections"]
+        SEC --> EMB["Turn each chunk<br/>into a vector"]
+        EMB --> KB[("Knowledge base<br/>vectors + text + page numbers")]
+    end
+
+    subgraph ANS["② Answering · every question"]
+        direction TB
+        Q["💬 Question"] --> DET["Which chemical?<br/>e.g. acetone / 67-64-1"]
+        DET --> SRCH["Search only that SDS<br/>meaning + exact words"]
+        SRCH --> TOP["Best 6 excerpts<br/>labelled S1 … S6"]
+        TOP --> LLM["Mistral via Ollama<br/>writes the answer, citing labels"]
+        LLM --> CHK["Check every citation<br/>remove invented ones"]
+        CHK --> OUT["✅ Answer with [1] [2]<br/>+ the exact source pages"]
+    end
+
+    IDX ==>|searched by| ANS
 ```
+
+| Step | What happens | Code |
+|---|---|---|
+| Extract text | Reads each PDF page; rejects scanned, encrypted or corrupt files | `rag/loader.py` |
+| Identify the chemical | Finds the product name, CAS number and synonyms on the first pages | `rag/chemicals.py` |
+| Split into sections | Cuts along SDS Sections 1–16, removes repeated headers, keeps page numbers | `rag/chunking.py` |
+| Vectors + knowledge base | Embeds chunks with all-MiniLM-L6-v2 and saves a versioned FAISS index with a manifest | `rag/embeddings.py`, `rag/indexing.py` |
+| Which chemical? | Matches names, aliases (*methyl alcohol*) and CAS numbers in the question | `rag/chemicals.py` |
+| Search | Combines vector search (meaning) with BM25 keyword search (exact terms such as UN numbers) | `rag/retrieval.py`, `rag/bm25.py` |
+| Answer | Sends the labelled excerpts to the local model and streams its reply | `rag/pipeline.py`, `rag/llm.py` |
+| Check citations | Keeps only labels that were really supplied and maps them to file + page | `rag/citations.py` |
+
+If the question names a chemical with no SDS in the knowledge base (e.g. toluene), the app says so
+straight away without calling the model.
 
 Key design decisions:
 
