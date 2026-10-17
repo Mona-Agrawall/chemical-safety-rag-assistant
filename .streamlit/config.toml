@@ -1,0 +1,53 @@
+# Streamlit configuration for the Chemical Safety RAG Assistant.
+# Light and dark palettes are both defined; Streamlit follows the viewer's
+# system preference and the theme switcher in the app menu.
+
+[server]
+headless = true
+maxUploadSize = 50          # MB, hard ceiling; MAX_UPLOAD_MB enforces the app limit
+enableXsrfProtection = true
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = "none"   # never show tracebacks to end users
+
+[theme]
+# Font URLs must not contain commas: Streamlit splits this setting on commas.
+font = "IBM Plex Sans:https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap, sans-serif"
+# Family names must not start a word with a digit (e.g. "Source Serif 4"): Streamlit does not quote them.
+headingFont = "Newsreader:https://fonts.googleapis.com/css2?family=Newsreader:wght@500;600&display=swap, Georgia, serif"
+codeFont = "IBM Plex Mono:https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap, monospace"
+baseRadius = "0.45rem"
+buttonRadius = "0.45rem"
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+showSidebarBorder = true
+
+[theme.light]
+primaryColor = "#1E5E58"
+backgroundColor = "#F7F6F2"
+secondaryBackgroundColor = "#EEECE5"
+textColor = "#1C1C19"
+borderColor = "#DDD9CE"
+linkColor = "#1E5E58"
+codeBackgroundColor = "#EEECE5"
+
+[theme.light.sidebar]
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F2EC"
+
+[theme.dark]
+primaryColor = "#74B8AE"
+backgroundColor = "#131412"
+secondaryBackgroundColor = "#1F201D"
+textColor = "#E9E7E0"
+borderColor = "#34352F"
+linkColor = "#8CCBC1"
+codeBackgroundColor = "#1F201D"
+
+[theme.dark.sidebar]
+backgroundColor = "#191A17"
+secondaryBackgroundColor = "#24251F"

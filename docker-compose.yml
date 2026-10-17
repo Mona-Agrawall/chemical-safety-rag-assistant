@@ -1,0 +1,57 @@
+# Local / single-host deployment: the app plus an Ollama server.
+#
+#   docker compose up -d --build
+#   docker compose exec ollama ollama pull mistral   # once; the model persists in a volume
+#   open http://localhost:8501
+#
+# GPU (NVIDIA): docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
+services:
+  ollama:
+    image: ollama/ollama:0.40.3
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=30m
+    # Uncomment to reach Ollama from the host as well:
+    # ports:
+    #   - "11434:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  app:
+    build:
+      context: .
+      args:
+        EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
+    image: chemical-safety-rag-assistant:local
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-mistral}
+    ports:
+      - "8501:8501"
+    volumes:
+      # Named volumes are seeded from the image on first start (bundled SDS PDFs).
+      - sds-documents:/app/data
+      - sds-index:/app/storage
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+
+volumes:
+  ollama-models:
+  sds-documents:
+  sds-index:

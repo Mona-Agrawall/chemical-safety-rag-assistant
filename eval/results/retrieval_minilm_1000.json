@@ -1,0 +1,79 @@
+{
+  "generated_at": "2026-10-17T09:48:44+00:00",
+  "questions": 51,
+  "rows": [
+    {
+      "model": "sentence-transformers/all-MiniLM-L6-v2",
+      "chunk_size": 1000,
+      "chunks": 165,
+      "variant": "dense, no chemical filter",
+      "questions": 51,
+      "hit@1": 0.776,
+      "hit@3": 0.878,
+      "hit@5": 0.939,
+      "mrr": 0.845,
+      "contamination@k": 0.084,
+      "questions_with_any_contamination": 11,
+      "failures": 0,
+      "retrieval_latency_ms": 41.2,
+      "misses@5": [
+        "alias-methyl-alcohol",
+        "multi-ld50",
+        "multi-un"
+      ]
+    },
+    {
+      "model": "sentence-transformers/all-MiniLM-L6-v2",
+      "chunk_size": 1000,
+      "chunks": 165,
+      "variant": "dense + chemical filter",
+      "questions": 51,
+      "hit@1": 0.796,
+      "hit@3": 0.918,
+      "hit@5": 0.959,
+      "mrr": 0.874,
+      "contamination@k": 0.0,
+      "questions_with_any_contamination": 0,
+      "failures": 0,
+      "retrieval_latency_ms": 37.3,
+      "misses@5": [
+        "multi-ld50",
+        "multi-un"
+      ]
+    },
+    {
+      "model": "sentence-transformers/all-MiniLM-L6-v2",
+      "chunk_size": 1000,
+      "chunks": 165,
+      "variant": "hybrid, no chemical filter",
+      "questions": 51,
+      "hit@1": 0.857,
+      "hit@3": 0.959,
+      "hit@5": 0.98,
+      "mrr": 0.926,
+      "contamination@k": 0.228,
+      "questions_with_any_contamination": 27,
+      "failures": 0,
+      "retrieval_latency_ms": 53.4,
+      "misses@5": [
+        "multi-ld50"
+      ]
+    },
+    {
+      "model": "sentence-transformers/all-MiniLM-L6-v2",
+      "chunk_size": 1000,
+      "chunks": 165,
+      "variant": "hybrid + chemical filter",
+      "questions": 51,
+      "hit@1": 0.837,
+      "hit@3": 0.98,
+      "hit@5": 1,
+      "mrr": 0.926,
+      "contamination@k": 0.0,
+      "questions_with_any_contamination": 0,
+      "failures": 0,
+      "retrieval_latency_ms": 50.4,
+      "misses@5": []
+    }
+  ]
+}
