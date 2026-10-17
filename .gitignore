@@ -2,9 +2,15 @@
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual environment
 venv/
+.venv/
+
+# Local configuration (may contain machine-specific values)
 .env
 
 # OS files
@@ -14,8 +20,14 @@ Thumbs.db
 # Huggingface cache
 .cache/
 
-# Streamlit
-.streamlit/
+# Streamlit: keep the shared theme/config, ignore secrets
+.streamlit/secrets.toml
+
+# Generated data: the index is rebuilt with `python ingest.py`
+storage/
+
+# User uploads added through the app (bundled SDS files in data/ stay tracked)
+data/uploads/
 
 # Optional (if vectorstore becomes too big)
 # vectorstore/

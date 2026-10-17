@@ -1,859 +1,480 @@
-import hashlib
-import os
-import tempfile
-from pathlib import Path
+"""Chemical Safety RAG Assistant: Streamlit UI.
+
+All retrieval, prompting and citation logic lives in ``rag/``; this module
+only manages UI state and rendering.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from collections.abc import Iterator
+from datetime import datetime
+from typing import Any
 
 import streamlit as st
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.vectorstores import FAISS
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_ollama import ChatOllama
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# Chains import with robust compatibility fallback
-try:
-    from langchain.chains import create_history_aware_retriever, create_retrieval_chain
-    from langchain.chains.combine_documents import create_stuff_documents_chain
-except ImportError:
-    from langchain_classic.chains.combine_documents import create_stuff_documents_chain
-    from langchain_classic.chains.history_aware_retriever import create_history_aware_retriever
-    from langchain_classic.chains.retrieval import create_retrieval_chain
+from rag.config import Settings, configure_logging, load_settings
+from rag.errors import ConfigError, IndexBusyError, KnowledgeBaseError, LLMError, ModelNotFoundError
+from rag.export import ExportMessage, conversation_to_markdown
+from rag.health import HealthState, HealthStatus, check_ollama
+from rag.indexing import (
+    KBState,
+    KBStatus,
+    KnowledgeBase,
+    SyncReport,
+    assess_status,
+    load_knowledge_base,
+    read_current_version,
+    sync_knowledge_base,
+)
+from rag.pipeline import PreparedQuery, RagPipeline, Turn, make_llm
+from rag.uploads import UploadStatus, stage_uploads
+from ui import components as ui
 
-# ─────────────────────────────────────────────
-# Constants & Paths
-# ─────────────────────────────────────────────
-BASE_DIR = Path(__file__).resolve().parent
-VECTORSTORE_PATH = BASE_DIR / "vectorstore"
-DATA_PATH = BASE_DIR / "data"
+log = logging.getLogger("rag.app")
 
-CHUNK_SIZE = 800
-CHUNK_OVERLAP = 150
-TOP_K_CHUNKS = 5          # Retrieve 5 chunks for richer context
-MAX_HISTORY_TURNS = 6     # Keep only last 6 turns (12 messages) to stay within LLM context window
-OLLAMA_MODEL = "mistral"
-
-# ─────────────────────────────────────────────
-# Page Config
-# ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="Chemical Safety RAG Assistant",
-    page_icon="⚗️",
-    layout="wide"
+    page_title="SDS Assistant · Chemical Safety",
+    page_icon=":material/science:",
+    layout="centered",
+    initial_sidebar_state="auto",  # open on desktop, collapsed on phones
 )
 
-# ─────────────────────────────────────────────
-# Custom Styling
-# ─────────────────────────────────────────────
-st.markdown("""
-<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
 
-<style>
-
-/* ── Global reset & font ─────────────────────────────────────── */
-html, body, [class*="css"], .stApp {
-    font-family: 'EB Garamond', Georgia, serif !important;
-    background-color: #F8F7F5 !important;
-    color: #1A1A1A !important;
-}
-
-/* ── Main content area ───────────────────────────────────────── */
-.main .block-container {
-    background-color: #F8F7F5 !important;
-    padding-top: 2rem !important;
-    padding-bottom: 4rem !important;
-    max-width: 900px !important;
-}
-
-/* ── App title ───────────────────────────────────────────────── */
-h1 {
-    font-family: 'EB Garamond', Georgia, serif !important;
-    font-size: 2.4rem !important;
-    font-weight: 600 !important;
-    color: #0F0F0F !important;
-    letter-spacing: -0.02em !important;
-    line-height: 1.2 !important;
-    margin-bottom: 0.3rem !important;
-}
-
-h2, h3 {
-    font-family: 'EB Garamond', Georgia, serif !important;
-    color: #1A1A1A !important;
-    font-weight: 600 !important;
-}
-
-/* ── Subtitle / body text ────────────────────────────────────── */
-p, .stMarkdown p {
-    font-family: 'EB Garamond', Georgia, serif !important;
-    font-size: 1.1rem !important;
-    color: #3D3D3D !important;
-    line-height: 1.7 !important;
-}
-
-/* ── Sidebar ─────────────────────────────────────────────────── */
-[data-testid="stSidebar"] {
-    background-color: #FFFFFF !important;
-    border-right: 1px solid #E8E4DF !important;
-}
-
-[data-testid="stSidebar"] .block-container {
-    padding-top: 2rem !important;
-    padding-bottom: 2rem !important;
-}
-
-[data-testid="stSidebar"] h1,
-[data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3 {
-    font-size: 1rem !important;
-    font-weight: 600 !important;
-    color: #0F0F0F !important;
-    text-transform: uppercase !important;
-    letter-spacing: 0.08em !important;
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.7rem !important;
-}
-
-[data-testid="stSidebar"] p,
-[data-testid="stSidebar"] .stMarkdown p {
-    font-size: 0.95rem !important;
-    color: #5A5A5A !important;
-    font-family: 'Inter', sans-serif !important;
-}
-
-[data-testid="stSidebar"] .stCaption,
-[data-testid="stSidebar"] small {
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.78rem !important;
-    color: #888888 !important;
-}
-
-/* ── Sidebar buttons (preset questions) ─────────────────────── */
-[data-testid="stSidebar"] .stButton > button {
-    background-color: #F5F3F0 !important;
-    color: #2A2A2A !important;
-    border: 1px solid #E2DDD8 !important;
-    border-radius: 6px !important;
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.78rem !important;
-    font-weight: 400 !important;
-    padding: 0.45rem 0.8rem !important;
-    text-align: left !important;
-    width: 100% !important;
-    transition: all 0.18s ease !important;
-    white-space: normal !important;
-    height: auto !important;
-    line-height: 1.4 !important;
-}
-
-[data-testid="stSidebar"] .stButton > button:hover {
-    background-color: #1A1A1A !important;
-    color: #FFFFFF !important;
-    border-color: #1A1A1A !important;
-    transform: translateX(2px) !important;
-}
-
-/* ── Clear history button ─────────────────────────────────────── */
-[data-testid="stSidebar"] .stButton:first-of-type > button {
-    background-color: #1A1A1A !important;
-    color: #FFFFFF !important;
-    border: none !important;
-    border-radius: 6px !important;
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.82rem !important;
-    font-weight: 500 !important;
-    letter-spacing: 0.02em !important;
-    padding: 0.55rem 1rem !important;
-    transition: all 0.18s ease !important;
-}
-
-[data-testid="stSidebar"] .stButton:first-of-type > button:hover {
-    background-color: #3A3A3A !important;
-    transform: none !important;
-}
-
-/* ── Dividers ────────────────────────────────────────────────── */
-hr {
-    border: none !important;
-    border-top: 1px solid #E8E4DF !important;
-    margin: 1.2rem 0 !important;
-}
-
-/* ── File uploader ───────────────────────────────────────────── */
-[data-testid="stFileUploader"] {
-    background-color: #FFFFFF !important;
-    border: 1.5px dashed #C8C0B8 !important;
-    border-radius: 10px !important;
-    padding: 1.2rem !important;
-    transition: border-color 0.2s ease !important;
-}
-
-[data-testid="stFileUploader"]:hover {
-    border-color: #1A1A1A !important;
-}
-
-[data-testid="stFileUploader"] label {
-    font-family: 'EB Garamond', Georgia, serif !important;
-    font-size: 1rem !important;
-    color: #3D3D3D !important;
-}
-
-[data-testid="stFileUploader"] small,
-[data-testid="stFileUploader"] .stCaption {
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.78rem !important;
-    color: #8A8A8A !important;
-}
-
-/* ── Chat messages ───────────────────────────────────────────── */
-[data-testid="stChatMessage"] {
-    border-radius: 10px !important;
-    margin-bottom: 0.8rem !important;
-    padding: 1rem 1.2rem !important;
-    font-family: 'EB Garamond', Georgia, serif !important;
-}
-
-/* User message */
-[data-testid="stChatMessage"][data-testid*="user"],
-[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
-    background-color: #EFEFED !important;
-    border: 1px solid #E4E0DA !important;
-}
-
-/* Assistant message */
-[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {
-    background-color: #FFFFFF !important;
-    border: 1px solid #E8E4DF !important;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.05) !important;
-}
-
-[data-testid="stChatMessage"] p {
-    font-size: 1.05rem !important;
-    line-height: 1.75 !important;
-    color: #1A1A1A !important;
-}
-
-/* Chat avatar icons */
-[data-testid="chatAvatarIcon-user"] {
-    background-color: #1A1A1A !important;
-    color: #FFFFFF !important;
-}
-
-[data-testid="chatAvatarIcon-assistant"] {
-    background-color: #8B7355 !important;
-    color: #FFFFFF !important;
-}
-
-/* ── Chat input bar ──────────────────────────────────────────── */
-[data-testid="stChatInputContainer"] {
-    background-color: #FFFFFF !important;
-    border: 1.5px solid #D8D2CB !important;
-    border-radius: 10px !important;
-    box-shadow: 0 2px 12px rgba(0,0,0,0.06) !important;
-    transition: border-color 0.2s ease, box-shadow 0.2s ease !important;
-}
-
-[data-testid="stChatInputContainer"]:focus-within {
-    border-color: #1A1A1A !important;
-    box-shadow: 0 2px 16px rgba(0,0,0,0.1) !important;
-}
-
-[data-testid="stChatInputContainer"] textarea {
-    font-family: 'EB Garamond', Georgia, serif !important;
-    font-size: 1.05rem !important;
-    color: #1A1A1A !important;
-    background-color: transparent !important;
-}
-
-[data-testid="stChatInputContainer"] textarea::placeholder {
-    color: #ABABAB !important;
-    font-style: italic !important;
-}
-
-/* Chat send button */
-[data-testid="stChatInputSubmitButton"] > button {
-    background-color: #1A1A1A !important;
-    color: #FFFFFF !important;
-    border-radius: 7px !important;
-    border: none !important;
-    transition: background-color 0.18s ease !important;
-}
-
-[data-testid="stChatInputSubmitButton"] > button:hover {
-    background-color: #3A3A3A !important;
-}
-
-/* ── Expanders (source citations) ────────────────────────────── */
-[data-testid="stExpander"] {
-    background-color: #FFFFFF !important;
-    border: 1px solid #E8E4DF !important;
-    border-radius: 8px !important;
-    margin-top: 0.6rem !important;
-}
-
-[data-testid="stExpander"] summary {
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.82rem !important;
-    font-weight: 500 !important;
-    color: #5A5A5A !important;
-    letter-spacing: 0.02em !important;
-    padding: 0.6rem 0.8rem !important;
-}
-
-[data-testid="stExpander"] summary:hover {
-    color: #1A1A1A !important;
-}
-
-[data-testid="stExpander"] .stText,
-[data-testid="stExpander"] pre {
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.8rem !important;
-    color: #5A5A5A !important;
-    background-color: #F8F7F5 !important;
-    border-radius: 6px !important;
-    padding: 0.6rem 0.8rem !important;
-    line-height: 1.55 !important;
-    white-space: pre-wrap !important;
-    word-break: break-word !important;
-}
-
-.stCaption, small {
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.78rem !important;
-    color: #7A7A7A !important;
-    font-weight: 500 !important;
-}
-
-/* ── Alerts (success / info / warning / error) ───────────────── */
-[data-testid="stAlert"] {
-    border-radius: 8px !important;
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.9rem !important;
-    border-left-width: 3px !important;
-}
-
-/* Success */
-[data-testid="stAlert"][data-baseweb="notification"][kind="positive"] {
-    background-color: #F2FAF5 !important;
-    border-left-color: #2D7A55 !important;
-    color: #1A4830 !important;
-}
-
-/* Info */
-[data-testid="stAlert"][data-baseweb="notification"][kind="info"] {
-    background-color: #F5F7FA !important;
-    border-left-color: #5A7A9A !important;
-    color: #2A3D50 !important;
-}
-
-/* Warning */
-[data-testid="stAlert"][data-baseweb="notification"][kind="warning"] {
-    background-color: #FDF8F0 !important;
-    border-left-color: #A07840 !important;
-    color: #5A4020 !important;
-}
-
-/* Error */
-[data-testid="stAlert"][data-baseweb="notification"][kind="negative"] {
-    background-color: #FDF2F2 !important;
-    border-left-color: #A03535 !important;
-    color: #5A1A1A !important;
-}
-
-/* ── Spinner ─────────────────────────────────────────────────── */
-[data-testid="stSpinner"] p {
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.88rem !important;
-    color: #6A6A6A !important;
-    font-style: italic !important;
-}
-
-/* ── Scrollbar ───────────────────────────────────────────────── */
-::-webkit-scrollbar {
-    width: 5px;
-    height: 5px;
-}
-::-webkit-scrollbar-track {
-    background: #F0EDE9;
-}
-::-webkit-scrollbar-thumb {
-    background: #C8C0B8;
-    border-radius: 4px;
-}
-::-webkit-scrollbar-thumb:hover {
-    background: #9A9490;
-}
-
-/* ── Tooltip / help icon ─────────────────────────────────────── */
-[data-testid="stTooltipIcon"] {
-    color: #ABABAB !important;
-}
-
-/* ── Selection highlight ─────────────────────────────────────── */
-::selection {
-    background-color: #C8B89A !important;
-    color: #1A1A1A !important;
-}
-
-</style>
-""", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────
-# Cached Resources (load once per server session)
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Cached resources (shared across sessions)
+# ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
-def get_embeddings() -> HuggingFaceEmbeddings:
-    """Load MiniLM sentence-transformer weights once into memory."""
-    return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+def get_settings() -> Settings:
+    return load_settings()
+
+
+@st.cache_resource(show_spinner="Loading embedding model…")
+def get_embedder(model: str, device: str) -> Any:
+    from rag.embeddings import Embedder
+
+    return Embedder(model, device)
 
 
 @st.cache_resource(show_spinner=False)
-def get_llm() -> ChatOllama:
-    """Create a single shared Ollama client (not re-instantiated on chain rebuild)."""
-    return ChatOllama(model=OLLAMA_MODEL, temperature=0)
+def get_reranker(model: str, device: str) -> Any:
+    from rag.rerank import CrossEncoderReranker
+
+    return CrossEncoderReranker(model, device)
 
 
-def check_ollama() -> tuple[bool, str]:
-    """
-    Probe Ollama with a trivial request to confirm it's reachable before
-    any user interaction.  Returns (ok: bool, error_message: str).
-    """
-    try:
-        llm = get_llm()
-        llm.invoke("ping")
-        return True, ""
-    except Exception as e:
-        err = str(e)
-        if "Connection refused" in err or "ConnectError" in err or "connect" in err.lower():
-            return False, (
-                "Cannot connect to Ollama. Make sure it is running.\n\n"
-                "**Start Ollama:** open a terminal and run `ollama serve`\n\n"
-                f"**Then pull the model:** `ollama pull {OLLAMA_MODEL}`"
-            )
-        return False, f"Ollama error: {err}"
+@st.cache_resource(show_spinner="Loading knowledge base…", max_entries=2)
+def get_kb(version: str) -> KnowledgeBase:
+    return load_knowledge_base(get_settings(), version)
 
 
-# ─────────────────────────────────────────────
-# PDF Processing Utilities
-# ─────────────────────────────────────────────
-def _file_signature(files) -> str:
-    """
-    Produce a stable hash from (name, size) pairs so we only re-index
-    when the actual file set changes, not on every Streamlit rerun.
-    """
-    key = str(sorted((f.name, f.size) for f in files))
-    return hashlib.md5(key.encode()).hexdigest()
+@st.cache_resource(show_spinner=False, max_entries=2)
+def get_pipeline(version: str) -> RagPipeline:
+    s = get_settings()
+    reranker = get_reranker(s.reranker_model, s.embedding_device) if s.reranker_enabled else None
+    return RagPipeline(s, get_kb(version), get_embedder(s.embedding_model, s.embedding_device),
+                       make_llm(s), reranker)
 
 
-def process_pdfs(files) -> list:
-    """
-    Extract LangChain Documents from uploaded PDF files.
-    Guarantees deletion of temporary disk copies via try/finally.
-    """
-    documents = []
-    for file in files:
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                file.seek(0)
-                tmp.write(file.read())
-                tmp_path = tmp.name
-            docs = PyPDFLoader(tmp_path).load()
-            for doc in docs:
-                doc.metadata["source"] = file.name
-            documents.extend(docs)
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-    return documents
-
-
-def split_documents(documents: list) -> list:
-    """Split documents into overlapping chunks using shared constants."""
-    return RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-    ).split_documents(documents)
-
-
-def create_vectorstore(chunks: list) -> FAISS:
-    """Build an in-memory FAISS index from document chunks."""
-    return FAISS.from_documents(chunks, get_embeddings())
-
-
-def load_default_vectorstore() -> FAISS | None:
-    """Load the pre-built FAISS index from disk if it exists."""
-    faiss_file = VECTORSTORE_PATH / "index.faiss"
-    if VECTORSTORE_PATH.exists() and faiss_file.exists():
-        return FAISS.load_local(
-            str(VECTORSTORE_PATH),
-            get_embeddings(),
-            allow_dangerous_deserialization=True,
-        )
-    return None
-
-
-# ─────────────────────────────────────────────
-# RAG Chain Construction
-# ─────────────────────────────────────────────
-def create_chain(vectorstore: FAISS):
-    """
-    Build the full conversational RAG chain:
-      1. history_aware_retriever  – rewrites ambiguous follow-up questions
-      2. stuff_documents_chain    – fills the safety-focused QA prompt
-      3. retrieval_chain          – wires them together
-
-    Uses the module-level cached LLM so Ollama is not re-connected on
-    every vectorstore switch.
-    """
-    llm = get_llm()
-    retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K_CHUNKS})
-
-    # Rewrite follow-up questions to be self-contained
-    contextualize_prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "Given the chat history and the latest user question, rewrite the question "
-         "as a fully self-contained query that does NOT rely on prior context. "
-         "Return it unchanged if it is already self-contained. Do NOT answer it."),
-        MessagesPlaceholder("chat_history"),
-        ("human", "{input}"),
-    ])
-    history_aware_retriever = create_history_aware_retriever(
-        llm, retriever, contextualize_prompt
-    )
-
-    # Chemical-safety-specific QA prompt with strict grounding rules
-    qa_prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "You are a specialist Chemical Safety Assistant. Your answers must be "
-         "based SOLELY on the Safety Data Sheet (SDS) context provided below.\n\n"
-         "RULES — follow these exactly:\n"
-         "1. Do NOT speculate, extrapolate, or use general chemistry knowledge to "
-         "fill gaps. Chemical properties (flash points, exposure limits, PPE "
-         "materials, first-aid steps) MUST come from the retrieved text.\n"
-         "2. If the context does not contain the requested information, say EXACTLY: "
-         "'The provided Safety Data Sheets do not contain this information.'\n"
-         "3. Cite the source document name and page number at the end of every "
-         "factual statement, e.g. *(acetone_sds.pdf – p. 4)*.\n"
-         "4. Use clear, plain language suitable for a lab technician or first responder.\n\n"
-         "SDS Context:\n{context}"),
-        MessagesPlaceholder("chat_history"),
-        ("human", "{input}"),
-    ])
-
-    qa_chain = create_stuff_documents_chain(llm, qa_prompt)
-    return create_retrieval_chain(history_aware_retriever, qa_chain)
-
-
-# ─────────────────────────────────────────────
-# History Windowing
-# ─────────────────────────────────────────────
-def get_windowed_history() -> list:
-    """
-    Return only the most recent MAX_HISTORY_TURNS turn-pairs from the
-    LangChain chat_history list to avoid overflowing the LLM context window.
-    Each turn = 1 HumanMessage + 1 AIMessage = 2 list items.
-    """
-    history = st.session_state.get("chat_history", [])
-    max_messages = MAX_HISTORY_TURNS * 2
-    return history[-max_messages:] if len(history) > max_messages else history
-
-
-# ─────────────────────────────────────────────
-# Source Deduplication
-# ─────────────────────────────────────────────
-def deduplicate_sources(context_docs: list) -> list:
-    """
-    Remove duplicate chunks by (source, page) so the citation panel
-    doesn't show the same page excerpt multiple times.
-    """
-    seen = set()
-    unique = []
-    for doc in context_docs:
-        src = doc.metadata.get("source", "Unknown")
-        raw = doc.metadata.get("page", 0)
-        page = (raw + 1) if isinstance(raw, int) else raw
-        key = (src, page)
-        if key not in seen:
-            seen.add(key)
-            unique.append((src, page, doc.page_content.strip()))
-    return unique
-
-
-# ─────────────────────────────────────────────
-# Session State Helpers
-# ─────────────────────────────────────────────
-def init_session_state():
-    defaults = {
-        "messages": [],
-        "chat_history": [],
-        "current_upload_sig": None,
-        "active_source": "Initializing…",
-        "ollama_ok": None,   # None = not checked yet
+# ─────────────────────────────────────────────────────────────────────────────
+# Session state
+# ─────────────────────────────────────────────────────────────────────────────
+def init_state() -> None:
+    defaults: dict[str, Any] = {
+        "messages": [],  # list of dicts, see add_assistant_message()
+        "health": None,
+        "uploader_key": 0,
+        "upload_results": [],
+        "scope_filter": [],
+        "build_attempted": False,
+        "sync_notes": [],  # (kind, text) from the last index sync
     }
-    for key, val in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = val
+    for k, v in defaults.items():
+        st.session_state.setdefault(k, v)
 
 
-def load_chain_from_default():
-    """Attempt to load the pre-built vectorstore and wire the chain."""
-    vs = load_default_vectorstore()
-    if vs:
-        st.session_state.chain = create_chain(vs)
-        st.session_state.active_source = (
-            "Pre-indexed SDS database (Acetone, Benzene, Ethanol, Methanol)"
-        )
-    else:
-        st.session_state.pop("chain", None)
-        st.session_state.active_source = "No database found. Upload SDS PDFs to begin."
+def get_health(settings: Settings, force: bool = False) -> HealthStatus:
+    h: HealthStatus | None = st.session_state.health
+    max_age = 60 if (h and h.ok) else 10
+    if force or h is None or time.time() - h.checked_at > max_age:
+        h = check_ollama(settings.ollama_base_url, settings.ollama_model, settings.health_timeout_s)
+        st.session_state.health = h
+    return h
 
 
-# ─────────────────────────────────────────────
+def history_turns() -> list[Turn]:
+    turns: list[Turn] = []
+    for m in st.session_state.messages:
+        if m["role"] == "user":
+            turns.append(Turn("user", m["content"], tuple(m.get("scope", ()))))
+        elif not m.get("error"):
+            turns.append(Turn("assistant", m.get("raw", m["content"])))
+    return turns
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Knowledge-base lifecycle
+# ─────────────────────────────────────────────────────────────────────────────
+def run_sync(settings: Settings, *, full: bool, label: str) -> SyncReport | None:
+    embedder = get_embedder(settings.embedding_model, settings.embedding_device)
+    bar = st.progress(0.0, text=label)
+
+    def progress(stage: str, done: int, total: int) -> None:
+        names = {"scan": "Scanning documents", "parse": "Reading PDFs", "embed": "Embedding text",
+                 "write": "Saving index"}
+        weights = {"scan": (0.0, 0.05), "parse": (0.05, 0.3), "embed": (0.3, 0.95), "write": (0.95, 1.0)}
+        lo, hi = weights.get(stage, (0.0, 1.0))
+        frac = lo + (hi - lo) * (done / total if total else 1.0)
+        bar.progress(min(frac, 1.0), text=f"{names.get(stage, stage)} ({done}/{total})")
+
+    try:
+        report = sync_knowledge_base(settings, embedder, full_rebuild=full, progress=progress)
+    except IndexBusyError as exc:
+        bar.empty()
+        st.warning(str(exc))
+        return None
+    except Exception:
+        bar.empty()
+        log.exception("Index sync failed")
+        st.error("Building the index failed. The previous index (if any) is unchanged. See the server log.")
+        return None
+    bar.empty()
+    # Callers rerun the script right after a sync, so notes are kept in state and shown in the sidebar.
+    st.session_state.sync_notes = [("warning", f"Skipped {src}: {msg}") for src, msg in report.failed] + [
+        ("info", f"{src} has the same content as {original}, so it was not indexed twice.")
+        for src, original in report.duplicates
+    ]
+    st.toast(f"Knowledge base ready: {report.summary()}", icon=":material/check_circle:")
+    return report
+
+
+def load_active_kb(settings: Settings) -> tuple[KnowledgeBase | None, KBStatus]:
+    kb, err = None, None
+    try:
+        version = read_current_version(settings.index_dir)
+        if version:
+            kb = get_kb(version)
+        else:
+            err = KnowledgeBaseError("No index has been built yet.")
+    except KnowledgeBaseError as exc:
+        err = exc
+    return kb, assess_status(settings, kb, err)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
-# ─────────────────────────────────────────────
-def render_sidebar():
+# ─────────────────────────────────────────────────────────────────────────────
+def sidebar(
+    settings: Settings, kb: KnowledgeBase | None, status: KBStatus, health: HealthStatus
+) -> Any:
+    """Render the sidebar; returns the (still empty) container for the conversation controls."""
     with st.sidebar:
-        st.header("⚙️ Controls")
+        st.markdown("### SDS Assistant")
+        st.caption("Local, offline question answering over chemical Safety Data Sheets.")
 
-        if st.button("🧹 Clear Chat History", use_container_width=True):
+        # Model status
+        st.markdown("**Language model**")
+        if health.ok:
+            st.badge(f"{settings.ollama_model} · connected", icon=":material/check_circle:", color="green")
+        else:
+            label = {HealthState.MODEL_MISSING: "model not installed", HealthState.TIMEOUT: "not responding",
+                     HealthState.SERVER_DOWN: "offline"}.get(health.state, "error")
+            st.badge(f"Ollama · {label}", icon=":material/error:", color="red")
+            st.caption(health.message)
+            if st.button("Check again", icon=":material/refresh:", key="retry_health"):
+                get_health(settings, force=True)
+                st.rerun()
+
+        st.divider()
+
+        # Knowledge base
+        st.markdown("**Knowledge base**")
+        if kb is not None:
+            docs = kb.manifest.documents
+            st.caption(f"{len(docs)} documents · {len(kb.chunks)} indexed passages · built "
+                       f"{kb.manifest.created_at.replace('T', ' ')[:16]} UTC")
+            if docs:
+                ui.document_list([(d.chemical, d.filename, d.pages) for d in docs])
+            for kind, text in st.session_state.sync_notes:
+                getattr(st, kind)(text)
+            if status.state is KBState.STALE:
+                st.warning(status.message, icon=":material/sync_problem:")
+                if st.button("Update index", icon=":material/sync:", key="sync_btn") and run_sync(
+                    settings, full=False, label="Updating index…"
+                ):
+                    st.rerun()
+            identities = kb.identities
+            names = {i.key: i.name for i in identities}
+            # Drop selections for chemicals that are no longer indexed.
+            st.session_state.scope_filter = [k for k in st.session_state.scope_filter if k in names]
+            if len(identities) > 1:
+                st.multiselect(
+                    "Limit answers to",
+                    options=list(names),
+                    format_func=lambda k: names.get(k, k),
+                    key="scope_filter",
+                    placeholder="All chemicals (detected from your question)",
+                    help="By default the assistant detects which chemicals your question is about. "
+                    "Choose chemicals here to restrict every answer to their SDS.",
+                )
+
+        # Uploads
+        with st.expander("Add SDS documents", icon=":material/upload_file:"):
+            files = st.file_uploader(
+                "PDF Safety Data Sheets",
+                type=["pdf"],
+                accept_multiple_files=True,
+                key=f"uploader_{st.session_state.uploader_key}",
+                help=f"Text-based PDFs up to {settings.max_upload_mb} MB each. Scanned images are not supported.",
+            )
+            disabled = not files or (kb is None and status.state is not KBState.MISSING)
+            if st.button("Add to knowledge base", type="primary", disabled=disabled, icon=":material/add:"):
+                handle_uploads(settings, kb, files or [])
+            for kind, text in st.session_state.upload_results:
+                getattr(st, kind)(text)
+
+        st.divider()
+
+        # Conversation controls are filled in at the end of the run, after any new answer
+        # has been added; rendered here they would export a conversation missing its last turn.
+        conversation_slot = st.container()
+        st.caption(f"Embeddings: {settings.embedding_model.split('/')[-1]} · Retrieval: "
+                   f"{'hybrid (vector + keyword)' if settings.hybrid_search else 'vector'}"
+                   f"{' + reranker' if settings.reranker_enabled else ''}")
+    return conversation_slot
+
+
+def conversation_controls(slot: Any, settings: Settings, kb: KnowledgeBase | None) -> None:
+    with slot:
+        st.markdown("**Conversation**")
+        msgs = st.session_state.messages
+        if st.button("Clear conversation", icon=":material/delete_sweep:", disabled=not msgs,
+                     help="Clears this conversation only. The knowledge base is not affected.",
+                     use_container_width=True):
             st.session_state.messages = []
-            st.session_state.chat_history = []
+            st.toast("Conversation cleared")
+            st.rerun()
+        st.download_button(
+            "Export as Markdown",
+            data=export_markdown(settings, kb) if msgs else "",
+            file_name=f"sds-conversation-{datetime.now():%Y%m%d-%H%M}.md",
+            mime="text/markdown",
+            icon=":material/download:",
+            disabled=not msgs,
+            help="Download the conversation with its citations.",
+            use_container_width=True,
+        )
+        st.divider()
+
+
+def handle_uploads(settings: Settings, kb: KnowledgeBase | None, files: list[Any]) -> None:
+    results: list[tuple[str, str]] = []
+    payload = [(f.name, f.getvalue()) for f in files]
+    staged = stage_uploads(settings, payload, kb.manifest if kb else None)
+    for o in staged.outcomes:
+        if o.status is UploadStatus.REJECTED:
+            results.append(("error", f"{o.filename}: {o.message}"))
+        elif o.status is UploadStatus.DUPLICATE:
+            results.append(("info", f"{o.filename}: {o.message}"))
+    if staged.saved:
+        report = run_sync(settings, full=False, label=f"Indexing {len(staged.saved)} document(s)…")
+        if report is None:
+            # Nothing was written (sync failed or another writer was busy): undo every upload.
+            staged.rollback()
+            results.append(("error", "Indexing failed; the uploaded files were not added."))
+        else:
+            kept, rolled_back = staged.settle(settings.docs_dir, dict(report.failed))
+            for o in kept:
+                verb = "replaced and indexed" if o.status is UploadStatus.REPLACED else "added and indexed"
+                results.append(("success", f"{o.filename}: {verb}."))
+            for o in rolled_back:
+                results.append(("error", f"{o.filename}: could not be indexed, not added. {o.message}"))
+            if rolled_back:
+                # Removing/restoring files changed the folder again; bring the index back in line.
+                run_sync(settings, full=False, label="Restoring previous documents…")
+    st.session_state.upload_results = results
+    st.session_state.uploader_key += 1
+    st.rerun()
+
+
+def export_markdown(settings: Settings, kb: KnowledgeBase | None) -> str:
+    msgs = [
+        ExportMessage(m["role"], m["content"], m.get("sources", []), m.get("warnings", []))
+        for m in st.session_state.messages
+    ]
+    return conversation_to_markdown(msgs, model=settings.ollama_model,
+                                    index_version=kb.version if kb else "none")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat
+# ─────────────────────────────────────────────────────────────────────────────
+def render_message(m: dict[str, Any]) -> None:
+    avatar = ":material/person:" if m["role"] == "user" else ":material/science:"
+    with st.chat_message(m["role"], avatar=avatar):
+        if m["role"] == "user":
+            st.markdown(ui.escape_markdown(m["content"]))
+            return
+        if m.get("error"):
+            st.error(m["content"], icon=":material/error:")
+            return
+        st.markdown(ui.sanitize_answer(m["content"]))
+        for w in m.get("warnings", []):
+            st.caption(f":material/warning: {w}")
+        ui.sources_panel(m.get("sources", []), m.get("retrieved", []))
+
+
+def stream_answer(pipeline: RagPipeline, prepared: PreparedQuery, sink: list[str],
+                  failure: dict[str, Exception]) -> Iterator[str]:
+    try:
+        for piece in pipeline.stream(prepared):
+            sink.append(piece)
+            yield piece
+    except LLMError as exc:
+        failure["error"] = exc
+
+
+def answer_question(pipeline: RagPipeline, question: str) -> None:
+    st.session_state.messages.append({"role": "user", "content": question})
+    render_message(st.session_state.messages[-1])
+
+    with st.chat_message("assistant", avatar=":material/science:"):
+        scope_override = tuple(st.session_state.scope_filter) or None
+        prepared = pipeline.prepare(question, history_turns()[:-1], scope_override)
+        st.session_state.messages[-1]["scope"] = list(prepared.scope)
+        if prepared.scope:
+            st.caption("Searching: " + ", ".join(pipeline.display_name(k) for k in prepared.scope))
+
+        sink: list[str] = []
+        failure: dict[str, Exception] = {}
+        placeholder = st.empty()
+        t0 = time.perf_counter()
+        with placeholder.container(), st.spinner("Reading the Safety Data Sheets…"):
+            st.write_stream(stream_answer(pipeline, prepared, sink, failure))
+        placeholder.empty()
+        elapsed = time.perf_counter() - t0
+
+        err = failure.get("error")
+        text = "".join(sink)
+        if err is not None:
+            log.warning("Generation failed after %d chars: %s", len(text), err)
+            if not isinstance(err, ModelNotFoundError):
+                st.session_state.health = None  # force a fresh health check
+            if not text.strip():
+                failed_msg = {"role": "assistant", "content": f"Could not generate an answer. {err}", "error": True}
+                st.session_state.messages.append(failed_msg)
+                st.error(failed_msg["content"], icon=":material/error:")
+                return
+
+        answer = pipeline.finalize(prepared, text, interrupted=err is not None,
+                                   error=str(err) if err else None)
+        log.info("answer: %.1fs, %d chars, cited=%s, refused=%s, warnings=%d",
+                 elapsed, len(answer.text), answer.cited_labels, answer.refused, len(answer.warnings))
+        msg: dict[str, Any] = {
+            "role": "assistant",
+            "content": answer.markdown,
+            "raw": answer.text,
+            "sources": answer.cited_sources,
+            "retrieved": answer.sources,
+            "warnings": answer.warnings,
+        }
+        st.session_state.messages.append(msg)
+        st.markdown(ui.sanitize_answer(msg["content"]))
+        for w in msg["warnings"]:
+            st.caption(f":material/warning: {w}")
+        ui.sources_panel(msg["sources"], msg["retrieved"])
+
+
+def empty_state(kb: KnowledgeBase) -> str | None:
+    """Intro for first-time users; returns a question if an example was clicked."""
+    if not kb.chunks:
+        st.info("The knowledge base is empty. Add SDS PDFs from the sidebar to get started.",
+                icon=":material/upload_file:")
+        return None
+    st.markdown("##### Try asking")
+    picked = None
+    examples = ui.example_questions(kb.identities)
+    with st.container(key="examples"):
+        cols = st.columns(2)
+        for i, q in enumerate(examples):
+            if cols[i % 2].button(q, key=f"ex_{i}", use_container_width=True):
+                picked = q
+    st.caption(
+        "Each answer cites numbered sources. Open **Sources** under an answer to read the exact SDS "
+        "passage and page it came from."
+    )
+    return picked
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+def main() -> None:
+    try:
+        settings = get_settings()
+    except ConfigError as exc:
+        st.error(f"Configuration error: {exc}")
+        st.caption("Fix the value in your environment or .env file and restart the app.")
+        st.stop()
+    configure_logging(settings.log_level)
+    ui.inject_css()
+    init_state()
+
+    health = get_health(settings)
+    kb, status = load_active_kb(settings)
+
+    ui.header()
+    ui.disclaimer()
+
+    # First run: build the index automatically from the bundled documents.
+    if status.state is KBState.MISSING and not st.session_state.build_attempted:
+        st.session_state.build_attempted = True
+        st.info("Building the knowledge base from the documents folder for the first time…",
+                icon=":material/database:")
+        if run_sync(settings, full=False, label="Building knowledge base…"):
+            st.rerun()
+    if status.state in (KBState.INCOMPATIBLE, KBState.CORRUPT, KBState.MISSING):
+        st.error(status.message, icon=":material/database:")
+        if st.button("Rebuild index", type="primary", icon=":material/build:") and run_sync(
+            settings, full=True, label="Rebuilding index…"
+        ):
             st.rerun()
 
-        st.divider()
+    conversation_slot = sidebar(settings, kb, status, health)
 
-        # Ollama status
-        st.subheader("🤖 Ollama Status")
-        if st.session_state.ollama_ok is True:
-            st.success(f"✅ Connected — `{OLLAMA_MODEL}` ready")
-        elif st.session_state.ollama_ok is False:
-            st.error("❌ Ollama unreachable")
-        else:
-            st.info("⏳ Checking…")
+    if kb is None:
+        conversation_controls(conversation_slot, settings, kb)
+        return
 
-        st.divider()
+    pipeline = get_pipeline(kb.version)
+    msgs = st.session_state.messages
+    if msgs and msgs[-1]["role"] == "user":
+        # Every completed or failed answer appends an assistant message, so a trailing user
+        # message means the script was stopped mid-answer (e.g. a new question sent while streaming).
+        msgs.append({"role": "assistant", "error": True,
+                     "content": "This answer was interrupted before it finished. Ask again for a complete answer."})
+    picked = None
+    if not msgs:
+        picked = empty_state(kb)
+    for m in st.session_state.messages:
+        render_message(m)
 
-        # Knowledge base status
-        st.subheader("🗄️ Knowledge Base")
-        src = st.session_state.get("active_source", "")
-        if "Uploaded" in src:
-            st.info(f"📁 {src}")
-        elif "Pre-indexed" in src:
-            st.success(f"🗄️ {src}")
-        elif "Initializing" in src:
-            st.info(f"⏳ {src}")
-        else:
-            st.warning(f"⚠️ {src}")
-
-        # History window indicator
-        total_turns = len(st.session_state.chat_history) // 2
-        st.caption(
-            f"Conversation: {total_turns} turns "
-            f"(window: last {min(total_turns, MAX_HISTORY_TURNS)} sent to LLM)"
-        )
-
-        st.divider()
-
-        # Preset questions
-        st.subheader("💡 Example Questions")
-        presets = [
-            "What are the primary hazards of acetone?",
-            "What PPE is required when handling benzene?",
-            "What is the flash point of ethanol?",
-            "What first-aid measures apply to methanol ingestion?",
-            "How should acetone be stored safely?",
-        ]
-        for q in presets:
-            if st.button(f"🔍 {q}", key=f"preset_{q}", use_container_width=True):
-                st.session_state.preset_query = q
-
-        st.divider()
-        st.caption(
-            "🔒 Fully offline · No API keys required\n\n"
-            f"Model: **{OLLAMA_MODEL}** · Embeddings: **all-MiniLM-L6-v2**"
-        )
-
-
-# ─────────────────────────────────────────────
-# Main Application
-# ─────────────────────────────────────────────
-init_session_state()
-
-# ── Ollama health check (runs once per session) ──────────────────────────
-if st.session_state.ollama_ok is None:
-    with st.spinner("Checking Ollama connection…"):
-        ok, err_msg = check_ollama()
-    st.session_state.ollama_ok = ok
-    if not ok:
-        st.error(f"⚠️ {err_msg}")
-
-render_sidebar()
-
-# ── Page header ──────────────────────────────────────────────────────────
-st.markdown("""
-<div style="margin-bottom: 0.2rem;">
-    <span style="
-        font-family: 'Inter', sans-serif;
-        font-size: 0.7rem;
-        font-weight: 600;
-        letter-spacing: 0.14em;
-        text-transform: uppercase;
-        color: #8B7355;
-    ">Chemical Safety · RAG Assistant</span>
-</div>
-<h1 style="
-    font-family: 'EB Garamond', Georgia, serif;
-    font-size: 2.6rem;
-    font-weight: 600;
-    color: #0F0F0F;
-    letter-spacing: -0.025em;
-    line-height: 1.15;
-    margin: 0 0 0.5rem 0;
-">⚗️ Ask Your Safety Data Sheets</h1>
-<p style="
-    font-family: 'EB Garamond', Georgia, serif;
-    font-size: 1.1rem;
-    color: #6A6A6A;
-    margin: 0 0 1.5rem 0;
-    line-height: 1.6;
-    font-style: italic;
-">Grounded answers on chemical hazards, PPE, first aid, and storage —
-cited directly from your SDS documents.</p>
-<div style="width: 48px; height: 2px; background-color: #8B7355; border-radius: 2px; margin-bottom: 1.5rem;"></div>
-""", unsafe_allow_html=True)
-
-# ── File uploader ─────────────────────────────────────────────────────────
-uploaded_files = st.file_uploader(
-    "📎  Upload Safety Data Sheets (PDF)",
-    type=["pdf"],
-    accept_multiple_files=True,
-    help="Uploads replace the active knowledge base for this session. Remove files to revert to the pre-indexed database.",
-)
-
-# ── Vectorstore / chain state management ─────────────────────────────────
-new_sig = _file_signature(uploaded_files) if uploaded_files else None
-
-if uploaded_files and new_sig != st.session_state.current_upload_sig:
-    # New or changed files — reindex
-    with st.spinner(f"Indexing {len(uploaded_files)} file(s)…"):
-        try:
-            docs = process_pdfs(uploaded_files)
-            if docs:
-                chunks = split_documents(docs)
-                vs = create_vectorstore(chunks)
-                st.session_state.chain = create_chain(vs)
-                names = ", ".join(f.name for f in uploaded_files)
-                st.session_state.active_source = (
-                    f"Uploaded: {names} — {len(chunks)} chunks"
-                )
-                st.session_state.current_upload_sig = new_sig
-                st.toast(f"✅ Indexed {len(chunks)} chunks from {len(uploaded_files)} file(s).")
-            else:
-                st.error("❌ No text could be extracted from the uploaded PDFs.")
-        except Exception as exc:
-            st.error(f"❌ Indexing failed: {exc}")
-
-elif not uploaded_files and st.session_state.current_upload_sig is not None:
-    # Files removed — revert to default
-    st.session_state.current_upload_sig = None
-    with st.spinner("Loading pre-indexed database…"):
-        load_chain_from_default()
-    st.toast("Reverted to the pre-indexed chemical database.")
-
-elif "chain" not in st.session_state:
-    # First load — pull default vectorstore
-    with st.spinner("Loading pre-indexed SDS database…"):
-        load_chain_from_default()
-
-st.divider()
-
-# ── Chat history display ──────────────────────────────────────────────────
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-        if msg.get("sources"):
-            with st.expander("📑 Referenced SDS Sources", expanded=False):
-                for src in msg["sources"]:
-                    st.caption(
-                        f"**{src['source']}** · Page {src['page']}"
-                    )
-                    st.text(src["content"])
-                    st.divider()
-
-# ── Chat input ────────────────────────────────────────────────────────────
-preset = st.session_state.pop("preset_query", None)
-user_input = st.chat_input(
-    "Ask a chemical safety question…",
-    disabled=not st.session_state.get("ollama_ok", False),
-)
-query = preset or user_input
-
-# ── Input validation ──────────────────────────────────────────────────────
-if query and not query.strip():
-    query = None  # ignore whitespace-only input
-
-if query:
-    if "chain" not in st.session_state:
-        st.warning("⚠️ Please wait for the database to finish loading, or upload SDS PDFs.")
-    elif not st.session_state.ollama_ok:
-        st.error("❌ Ollama is not running. Please start it and refresh the page.")
+    if not health.ok:
+        placeholder_text = "Waiting for the language model. See the status in the sidebar."
+    elif not kb.chunks:
+        placeholder_text = "Add SDS documents to start asking questions."
     else:
-        # Show user message
-        st.session_state.messages.append({"role": "user", "content": query})
-        with st.chat_message("user"):
-            st.markdown(query)
+        placeholder_text = "Ask about hazards, PPE, first aid, storage, properties…"
+    typed = st.chat_input(placeholder_text, disabled=not (health.ok and kb.chunks),
+                          max_chars=settings.max_question_chars)
+    question = (picked or typed or "").strip()
+    if question:
+        if not get_health(settings, force=True).ok:
+            st.warning("The language model is not available right now. Check the sidebar and try again.")
+        else:
+            answer_question(pipeline, question)
+    conversation_controls(conversation_slot, settings, kb)
 
-        # Generate answer
-        with st.chat_message("assistant"):
-            try:
-                with st.spinner("Searching SDS documents and generating answer…"):
-                    result = st.session_state.chain.invoke({
-                        "input": query,
-                        "chat_history": get_windowed_history(),
-                    })
 
-                answer = result.get("answer", "").strip()
-                if not answer:
-                    answer = "I was unable to generate an answer. Please try rephrasing your question."
-
-                st.markdown(answer)
-
-                # Deduplicated source citations
-                raw_context = result.get("context", [])
-                unique_sources = deduplicate_sources(raw_context)
-
-                if unique_sources:
-                    with st.expander("📑 Referenced SDS Sources", expanded=False):
-                        for src_name, page_num, snippet in unique_sources:
-                            st.caption(f"**{src_name}** · Page {page_num}")
-                            st.text(snippet)
-                            st.divider()
-
-                # Persist to session
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer,
-                    "sources": [
-                        {"source": s, "page": p, "content": c}
-                        for s, p, c in unique_sources
-                    ],
-                })
-                st.session_state.chat_history.extend([
-                    HumanMessage(content=query),
-                    AIMessage(content=answer),
-                ])
-
-            except Exception as exc:
-                err = str(exc)
-                if "Connection refused" in err or "ConnectError" in err:
-                    st.error(
-                        "❌ Lost connection to Ollama mid-session. "
-                        "Please ensure `ollama serve` is running and refresh the page."
-                    )
-                    st.session_state.ollama_ok = False
-                else:
-                    st.error(f"❌ Error generating response: {exc}")
+main()

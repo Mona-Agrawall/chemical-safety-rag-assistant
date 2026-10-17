@@ -1,26 +1,15 @@
-# Core framework
-streamlit>=1.32.0
-langchain>=0.2.16
-langchain-community>=0.2.16
-langchain-core>=0.2.0
-langchain-text-splitters>=0.2.0
-langchain-classic>=1.0.0
+# Runtime dependencies (direct, pinned). Versions verified together on Python 3.12.
+# Docker builds use requirements.lock (full transitive pin set for Linux).
+# For a CPU-only torch on Linux, install it first from the PyTorch CPU index:
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch==2.11.0
 
-# LLM & Embeddings providers
-langchain-ollama>=0.1.0
-langchain-huggingface>=0.0.3
-
-# Embeddings & ML
-sentence-transformers>=2.7.0
-transformers>=4.40.0
-torch>=2.2.0
-huggingface-hub>=0.23.0
-
-# Vector store
-faiss-cpu>=1.8.0
-
-# PDF processing
-pypdf>=4.2.0
-
-# Utilities
-python-dotenv>=1.0.0
+streamlit==1.55.0
+sentence-transformers==5.3.0
+transformers==5.3.0
+torch==2.11.0
+huggingface-hub==1.7.2
+faiss-cpu==1.13.2
+numpy==2.4.3
+pypdf==6.9.2
+httpx==0.28.1
+python-dotenv==1.2.2
